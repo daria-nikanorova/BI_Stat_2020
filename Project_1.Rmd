@@ -1,0 +1,621 @@
+---
+title: "Project #1. How old is mollusk"
+date: "10/15/2020"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_section: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("tidyr")) install.packages("tidyr")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("outliers")) install.packages("outliers")
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(outliers)
+library(car)
+```
+
+# Merging all data in a single dataframe
+
+This project was conducted by several students. First of all we need to create a data frame with all data they collected. The function **merge_all_data** combines all .csv files with identical variables saved in a directory and creates a single data frame binding them by rows. **merge_all_data** takes only one argument - absolute path to the directory with data.
+
+**NOTE!** 
+
+1) A path should be quoted.
+
+2) A user of Windows OS should double backslashes manually in a path as far as a single backslash has a special meaning in R.
+
+**Examples of using:**
+
+1) for Linux OS:
+`merge_all_data("/home/daria/Documents/IB_fall2020/Statistics_in_R/project1/Data")`
+
+2) for Windows OS:
+`merge_all_data("C:\\Users\\daria\\Documents\\project1\\Data")`
+
+```{r}
+merge_all_data <- function (my_path){
+  if (grepl('\\', my_path, fixed = TRUE) == T){
+    my_path <- chartr("\\", "/", my_path)
+    }
+  folder_files <- list.files(path = my_path, pattern = ".csv", ignore.case = T, full.names = T)
+  do.call(rbind, lapply(folder_files, function(x) read.csv(x)))
+}
+```
+
+Now we ready to use this function and create a data frame called **all_data**:
+
+```{r}
+all_data <- merge_all_data("/home/daria/Documents/IB_fall2020/Statistics_in_R/project1/Data") 
+
+head(all_data, 5) #look on 5 first rows
+
+nrow(all_data) #check if we have all observations
+```
+
+# EDA
+
+Now we have all data stored in a single data frame. Next step is EDA analysis.
+
+## Structure of the data
+
+```{r}
+str(all_data) #look on variables and their types
+
+```
+
+As we can see, variable Sex..1...male..2...female..3...uvenil. has very inconvenient name and inappropriate type. It would be better to rename this variable and make it factor with three levels: female, male and juvenile instead of "1", "2" and "3". 
+
+```{r}
+colnames(all_data)[2] <- "Sex" #rename sex variable
+table(all_data$Sex) #look on values
+```
+
+Function `table` returns a number of observations for each category. Let`s replace rare values "male", "one" and "three" with "3", "1" and "1" respectively.
+
+```{r}
+all_data[all_data$Sex %in% c("male", "one", "three"), "Sex"] <- c("3", "1", "1") #replace improper values
+```
+
+Now we can make variable "Sex" as factor with three levels: female, male and juvenile.
+
+```{r}
+all_data$Sex <- ifelse(all_data$Sex==1, "male", ifelse(all_data$Sex==2, "female", "juvenile")) #replace numeric values with characters
+all_data$Sex <- as.factor(all_data$Sex) #make this variable factor
+```
+
+Variables Rings and Length also have character type of values. It is not correct, as far as values of these variables are numeric.
+
+```{r}
+table(all_data$Rings) #look on values in Rings variable
+all_data[all_data$Rings == "nine", 1] <- 9 #replace character value with number
+
+all_data[grepl("^-?[0-9.]+$", all_data$Length) == F, ] #check if Length variable is really numeric
+all_data[3103, "Length"] <- NA #replace missing value with NA
+
+all_data <- mutate(all_data, Rings = as.numeric(Rings),
+                 Length = as.numeric(Length)) #make Rings and Length variables numeric
+
+str(all_data) #check if everything is alright!
+```
+
+## Dealing with missing values (NA)
+
+Missing values (NAs) can spoil further statistical analysis. If we have a great number of observations we can just delete observations with NAs. Otherwise, we can replace them with mean value. Firstly let`s check if we have NAs in our data.
+
+```{r}
+all_data[which(!complete.cases(all_data)), ] #print rows with NA
+```
+
+NA in variable Sex (row 343) can't be replaced. As far as we have 4177 observations in total, it is not dangerous to loose one - let's get rid of this row! 
+
+```{r}
+all_data <- all_data[-343, ]
+```
+
+Other NAs are in numeric variables - so we can replace them with mean value of each variable. However, it is quite obvious that mollusks can have different size parameters (length, number of rings, weight, etc) during their life. Also size parameters can depend on sex. We can see this difference between male, female and juvenile mollusks if we count mean value of all numeric variables for each group. 
+
+```{r}
+mean_by_Sex <- all_data %>% group_by(Sex) %>% summarize_if(., is.numeric, list(~ mean(., na.rm = T)))
+mean_by_Sex
+```
+
+So it is more wise to replace NAs with mean value of the group, to which this object belongs (male, female or juvenile). Function `replace_NA_grouped_mean` was written just for that!
+
+```{r}
+replace_NA_grouped_mean <- function(data_with_NA){
+  data_with_NA %>%
+    group_by(Sex) %>%
+    mutate_if(., is.numeric, list(~ ifelse(is.na(.), mean(., na.rm = T), .)))
+}
+```
+
+Let's use `replace_NA_grouped_mean` and check if all NAs were replaced:
+
+```{r message = FALSE}
+all_data <- replace_NA_grouped_mean(all_data)  
+nrow(all_data[which(!complete.cases(all_data)), ]) == 0
+```
+## Vizualization of outliers
+
+Outlying variables can be detected on boxplot. In order to create boxplots for all variables grouping by Sex, **all_data** was converted into long format using `tidyr::gather` 
+
+```{r}
+boxplots_all_vars <- all_data %>%
+  gather(variables, values, -Sex) %>%
+  ggplot(aes(y = values, fill = Sex)) +
+  geom_boxplot() +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  scale_fill_brewer(type = "div", palette = 7) +
+  facet_wrap(~variables, scales = "free")
+
+boxplots_all_vars
+```
+
+As we can see on **boxplots_all_vars** there are a great amount of outliers. In variable Height two values are extremely big. Are these outliers realy dangerous for futher analysis? In fact these two outliers can make it difficult to find correlation between two variables! 
+
+```{r message = FALSE}
+ggplot(all_data, aes(x = Height, y = Whole_weight)) +
+  geom_point() +
+  geom_smooth()
+```
+
+To decide whether to get rid of outliers, let's look on other measurements of this object:
+
+```{r}
+all_data[all_data$Height == outlier(all_data$Height), ]
+```
+
+In fact measurements of Diameter and other size features are quite comparable with mean values of female mollusks. We can assume that mistake was made only in measurement of Height. So we can replace that value with the mean value of Height for female mollusks.
+
+```{r}
+all_data[all_data$Height == 1.13, ]$Height <- mean_by_Sex$Height[mean_by_Sex$Sex == "female"]
+```
+
+However the second outlier has extremely big values not only in Height variable. So it would be better to remove this observation:
+
+```{r}
+all_data[all_data$Height == outlier(all_data$Height), ]
+all_data <- all_data[!all_data$Height == 0.515, ]
+```
+
+After removing these two outliers we can see that height and whole weight of mollusks may be positively correlated!
+
+```{r message = FALSE}
+ggplot(all_data, aes(x = Height, y = Whole_weight)) +
+  geom_point() +
+  geom_smooth()
+```
+
+## Possible correlation between variables
+
+Possible correlation between variables can be visualized using `pairs` function. 
+
+```{r}
+pairs(all_data)
+```
+
+
+# Mean and standard deviation of length of mollusks grouped by sex
+
+In order to calculate mean and standard deviation of length of mollusks we should firstly group them by sex. As it was said before, molluscs can have different size parameters (length, number of rings, weight, etc) during their life. Also size parameters can depend on sex. We can see that female molluscs have the biggest mean value and median of length. Male molluscs are quite smaller then female, and juveniles have smallest length. 
+
+```{r}
+all_data %>% group_by(., Sex) %>% summarise(., mean_Length = mean(Length), median_Length = median(Length))
+```
+
+# What percentage of molluscs are not higher than 0.165?
+
+Again `dplyr` pipelines are very useful!
+As we calculated, approximately 76% of molluscs are not higher than 0.165.
+
+```{r}
+all_data %>% filter(., Height <= 0.165) %>% nrow(.) * 100 / 4177
+```
+# Length value greater than 92% of all observations.
+Actually there are two different functions in R that can calculate sample quantiles: `qnorm` and `quantile`. As we can see they give different result! 
+
+```{r}
+qnorm(p = 0.92, mean = mean(all_data$Length), sd = sd(all_data$Length))
+quantile(all_data$Length, probs = 0.92)
+```
+
+On the one hand, `qnorm` returns the value at given quantile of a **normal distribution** with mean and variance estimated from data. On the other hand `quantile` does not assume any distribution. So the result will most probably depend on how well the normal distribution can describe our data. So we must check if Length variable is normally distributed. We can firstly create a density plot and qqplot:
+
+```{r}
+ggplot(all_data, aes(x = Length, fill = Sex)) +
+  geom_density(alpha = 0.5)
+```
+```{r}
+qqPlot(all_data$Length)
+```
+
+
+It looks like Length variable is not distributed normally! We can check it with Shapiro-Wilk normality test:
+
+```{r}
+shapiro.test(all_data$Length[all_data$Sex == "female"])
+shapiro.test(all_data$Length[all_data$Sex == "male"])
+shapiro.test(all_data$Length[all_data$Sex == "juvenile"])
+```
+
+Null hypothesis is that distribution of our data is normal. P-value < 2.2e-16 allows us to reject null hypothesis and accept alternative one: values of Length variable are not distributed normally. So in our case it is wise to use `quantile` function:
+
+```{r}
+quantile(all_data$Length, probs = 0.92)
+```
+ All in all, 0.67 is Length value that is greater than 92% of all observations.
+ 
+# Create a new variable Lenght_z_scores and store the values of the Length variable into it after standardizing it
+
+We can standardize variable values by formula: *(x - m)/sd*, where *x* is observed value, *m* is mean value and *sd* is standard deviation. Otherwise we can use function `scale`:
+
+```{r}
+#all_data1$Lenght_z_scores <- (all_data$Length - mean(all_data$Length))/sd(all_data$Length)
+all_data$Lenght_z_scores <- scale(all_data$Length)
+```
+
+# Compare the diameter of the molluscs with the number of rings 5 and 15
+
+**Null hypothesis**: mollusks with 5 and 15 rings do not significantly differ in diameter.
+
+**Alternative hypothesis**: mollusks with 5 and 15 rings have significantly different diameter.
+
+On this step I preferred not to divide our objects by Sex. I created a bar plot to count all mollusks having 5 or 15 rings grouped by sex:
+
+```{r}
+all_data %>% 
+  mutate(., Rings = as.factor(Rings)) %>% 
+  filter(., Rings == 5 | Rings == 15) %>% 
+  ggplot(., aes(x = Rings, fill = Sex, group = Sex)) +
+  geom_bar(width = 0.5) +
+  theme_bw() +
+  scale_fill_brewer(type = "div", palette = 7) +
+  geom_text(stat='count', aes(label=..count..), position = position_stack(vjust = 0.5))
+```
+
+We can see that most objects with 5 rings are juveniles and most objects with 15 rings are adults (males and females). It is due to the fact that number of rings is growing as a mollusk getting older. Because of that we can`t compare a sample of 4 female objects with a sample of 41 female objects, for example. So I compared all mollusks (female, male, juveniles) with 5 and 15 rings. 
+
+
+Firstly I created a plot with mean values and confidence limits for mollusks grouped by sex with 5 and 15 rings:
+
+```{r}
+all_data %>% 
+  mutate(., Rings = factor(Rings)) %>% 
+  filter(., Rings == 5 | Rings == 15) %>% 
+  ggplot(., aes(x = Rings, y = Diameter, color = Rings)) +
+  stat_summary(geom = 'pointrange', 
+               fun.data = mean_cl_normal) +
+  theme_bw() +
+  scale_color_brewer(type = "qual", palette = 2)
+```
+
+
+As we can see confidence limits between mollusks with 5 and 15 rings do not intersect, which implies that the diameter of the molluscs with 5 and 15 rings is different. 
+
+To answer the question if these groups are significantly different, I performed two-sampled Student's t-Test. The limitation for this test is normal distribution of variable or sample size (n should be more than 30). To check if diameter is distributed normally I used Shapiro-Wilk test:
+
+```{r}
+shapiro.test(all_data$Diameter)
+```
+
+The distribution is not normal (p-value < 0.05), but we have a great amount of observations: n = 115 for 5 rings and n = 103 for 15 rings.
+
+```{r}
+nrow(all_data[all_data$Rings == 5, ])
+nrow(all_data[all_data$Rings == 15, ])
+```
+So I used t-Test:
+
+```{r}
+t_test_diam <- t.test(x = all_data$Diameter[all_data$Rings == 5], y = all_data$Diameter[all_data$Rings == 15])
+t_test_diam
+```
+p-value less than 0.05 allows to accept alternative hypothesis: mollusks with 5 and 15 rings have significantly different diameter.
+
+# Relation between diameter and whole weight of mollusks
+
+## Transformation of variables
+
+To have a first look I created a scatter plot where the relationship between diameter and whole weight of mollusks (grouped by sex) is displayed:
+
+```{r message = FALSE}
+ggplot(all_data, aes(x = Diameter, y = Whole_weight, color = Sex, group = Sex)) +
+  geom_point() +
+  theme_bw() +
+  scale_color_brewer(type = "qual", palette = 2) +
+  geom_smooth(method = "loess", color = "black") +
+  facet_grid( ~ Sex)
+```
+
+It seems that these variables are related, but not linearly. In order to build a linear model I transformed Diameter variable into cube. Since that moment the results of regression analysis should be interpreted very accurately, as far as we manipulate with cube of Diameter that is not a real mesaurment.
+  
+```{r}
+all_data <- all_data %>% 
+  group_by(., Sex) %>% 
+  mutate(., Diameter_cube = Diameter^3)
+```
+
+Now we can test if the relationship between Whole_weight and Diameter_cube is linear:
+
+```{r message = FALSE}
+ggplot(all_data, aes(x = Diameter_cube, y = Whole_weight, color = Sex, group = Sex)) +
+  geom_point() +
+  theme_bw() +
+  scale_color_brewer(type = "qual", palette = 2) +
+  geom_smooth(method = "lm", color = "black") +
+  facet_grid( ~ Sex)
+```
+Looking on this scatter plot we can assume that Sex variable probably will not effect on slope or intercept, so we can unite all mollusks in one group:
+
+```{r}
+ggplot(all_data, aes(x = Diameter_cube, y = Whole_weight, color = Sex)) +
+  geom_point(alpha = 0.7) +
+  theme_bw() +
+  scale_color_brewer(type = "qual", palette = 2) +
+  geom_smooth(method = "loess", color = "black")
+```
+
+## Find a correlation between variables
+
+Now we can calculate a correlation coefficient using Pearson`s method:
+  
+```{r}
+cor.test(all_data$Diameter_cube, all_data$Whole_weight)
+```
+As we can see diameter and whole weight of mollusks are positively correlated with coefficient 0.96 and p-value < 2.2e-16.
+
+## Linear model
+
+Now we can calculate a linear model:
+
+```{r}
+lm_diam_weight <- lm(Diameter_cube ~ Whole_weight, all_data)
+summary(lm_diam_weight)
+```
+In the summary we can find values of coeficients: intercept = 0.0026 and slope = 0.09257.
+We can write an equation of our model as:
+
+**Diameter_cube = 0.0026229 + Whole_weight * 0.0925704 **
+
+Looking on p-value of t-test we can be sure, that these coefficients significantly differ from zero. 
+
+*T-test for slope tests a null hypothesis that two variables are not related. In that case a line describing their relationship lies in parallel with x axis.* 
+
+We can interpret slope value like that: if we enlarge whole weight with 1 unit, cube of diameter will become bigger on 0.09257.
+
+Before publish our results we should test if our model is appropriate.
+
+## Diagnostics of model
+
+Firstly we need to get data for analysis of residuals of our model. To do that I used function `fortify`:
+
+```{r}
+lm_diam_resid <- fortify(lm_diam_weight)
+head(lm_diam_resid)
+```
+### Cook distance
+
+Plot of Cook distance shows if there are any influential observations:
+```{r}
+cooks_dist <-  ggplot(lm_diam_resid, aes(x = 1:nrow(lm_diam_resid), y = .cooksd)) + 
+  geom_bar(stat = "identity") + 
+  geom_hline(yintercept = 0.3, color = "red") +
+  theme_bw()
+cooks_dist
+```
+
+As we can see none of them are higher than 2.0, which means there are no influential observations in our data.
+
+### Residuals vs fitted values
+
+This scatter plot shows if there are non-linear pattern between our variables and if the standard deviation is constant in the distribution of residuals (heteroscedasticity).
+
+```{r}
+lm_diam_weight_resid <- ggplot(lm_diam_resid, aes(x = .fitted, y = .stdresid)) + 
+  geom_point() + 
+  geom_hline(yintercept = 0, color = "green")+
+  theme_bw() +
+  geom_hline(yintercept = 2, color = "red") +
+  geom_hline(yintercept = -2, color = "red")
+
+lm_diam_weight_resid
+```
+
+Unfortunately, we can see a pattern of a funnel on this plot, which means that the residuals of our model are not distributed with constant sd.
+
+### Normal distribution of residuals
+
+Finally we should check if residuals in our model are distributed normally:
+
+```{r}
+lm_diam_weight_qq <- qqPlot(lm_diam_resid$.fitted)
+```
+
+We can see that residuals in our model are not distributed normally
+
+### Predicted values
+
+We can predict values using function `predict`:
+
+```{r message = FALSE}
+lm_diam_predicted <- predict(lm_diam_weight, interval = "prediction")
+diam_predicted <- data.frame(all_data, lm_diam_predicted)
+head(diam_predicted)
+```
+
+Also we can find predicted confidence limits for values:
+
+```{r}
+diam_conf <- as.data.frame(predict(lm_diam_weight, interval = "confidence"))
+```
+
+Finally we can draw a scatter plot with regression line and confidence limits for it and for values.
+
+```{r}
+ggplot(diam_predicted, aes(Whole_weight, fit)) +
+  geom_line(color = "blue") + 
+  geom_ribbon(aes(ymin = lwr, ymax = upr, x = Whole_weight), alpha = 0.2, fill = "blue") + 
+  geom_point(aes(y = Diameter_cube), alpha = 0.5) +
+  geom_ribbon(data = diam_conf, aes(ymin = lwr, ymax = upr, x = diam_predicted$Whole_weight), alpha = 0.2, fill = "blue") +
+  scale_y_continuous(name = "Diameter") +
+  scale_x_continuous(name = "Whole_weight") +
+  labs(title = "Linear model for weight - diameter relation in mollusks")
+```
+As we can see not all values are fitted into confidence limit (blue zone). All in all, our model have significant coefficients but it does not meet the requirements of the linear regression. Because of that we can not apply it to a real study and to the extrapolation. But as a result of this step we can be sure that diameter and whole weight of mollusks are positively correlated with coefficient 0.96 and p-value < 2.2e-16.
+
+# Relation between diameter and length of mollusks
+
+## Scatter plot
+
+Firstly I created a scatter plot, where we can assume a linear correlation between these two variables:
+
+```{r message = FALSE}
+ggplot(all_data, aes(x = Diameter, y = Length, color = Sex, group = Sex)) +
+  geom_point() +
+  theme_bw() +
+  scale_color_brewer(type = "qual", palette = 2) +
+  geom_smooth(method = "lm", color = "black")
+```
+
+
+## Correlation
+
+Correlation coefficient is significant and equals to 0.985662:
+
+```{r}
+cor.test(all_data$Diameter, all_data$Length)
+```
+## Linear model:
+
+Now we can calculate a linear model:
+
+```{r}
+lm_diam_length <- lm(Diameter ~ Length, all_data)
+summary(lm_diam_length)
+```
+In the summary we can find values of coeficients: intercept = -0.0018633 and slope = 0.813907.
+We can write an equation of our model as:
+
+**Diameter = -0.0018633 + Length * 0.813907 **
+
+Looking on p-value of t-test we can be sure, that these coefficients significantly differ from zero.
+
+## Diagnostics of model
+
+Firstly we need to get data for analysis of residuals of our model. To do that I used function `fortify`:
+
+```{r}
+diam_len_resid <- fortify(lm_diam_length)
+
+```
+
+### Cook distance
+
+Looking on a plot of Cook distance we can see that there are none influential observations:
+
+```{r}
+cooks_diam_len <-  ggplot(diam_len_resid, aes(x = 1:nrow(diam_len_resid), y = .cooksd)) + 
+  geom_bar(stat = "identity") + 
+  geom_hline(yintercept = 0.3, color = "red") +
+  theme_bw()
+cooks_diam_len
+```
+
+### Residuals vs fitted values
+
+Looking on this scatter plot shows we can assume that there is no strong heteroscedasticity in our variable, although some standardized errors are beyond red lines:
+
+```{r}
+diam_len_resid_plot <- ggplot(diam_len_resid, aes(x = .fitted, y = .stdresid)) + 
+  geom_point() + 
+  geom_hline(yintercept = 0, color = "green")+
+  theme_bw() +
+  geom_hline(yintercept = 2, color = "red") +
+  geom_hline(yintercept = -2, color = "red")
+
+diam_len_resid_plot
+```
+
+### Normal distribution of residuals
+
+Finally on qqplot we can see that residuals in our model are not distributed normally:
+
+```{r}
+diam_len_qq <- qqPlot(diam_len_resid$.fitted)
+diam_len_qq
+```
+### Predicted values
+
+We can predict values using function `predict`:
+
+```{r message = FALSE}
+diam_len_predicted <- predict(lm_diam_length, interval = "prediction")
+diam_len_predicted_all <- data.frame(all_data, diam_len_predicted)
+```
+
+Also we can find predicted confidence limits for values:
+
+```{r}
+diam_len_conf <- as.data.frame(predict(lm_diam_length, interval = "confidence"))
+```
+
+Finally we can draw a scatter plot with regression line and confidence limits for it and for values.
+
+```{r}
+ggplot(diam_len_predicted_all, aes(Length, fit)) +
+  geom_point(aes(y = Diameter), alpha = 0.5) +
+  geom_ribbon(aes(ymin = lwr, ymax = upr, x = Length), alpha = 0.2, fill = "blue") + 
+  geom_ribbon(data = diam_len_conf, aes(ymin = lwr, ymax = upr, x = diam_len_predicted_all$Length), alpha = 0.2, fill = "blue") +
+  geom_line(color = "blue")
+```
+Although our model does not meet some limitations of linear regression, we can see that our model can describe relation between Length and Diameter of mollusks in our data. It should not be used for extrapolation!
+
+# Compare the diameter of the male and female molluscs 
+
+**Null hypothesis**: female and male mollusks do not significantly differ in diameter.
+
+**Alternative hypothesis**: female mollusks are bigger than male mollusks.
+
+As I noticed there is a difference between diameter of male and female mollusks:
+
+```{r}
+mean(all_data$Diameter[all_data$Sex == "male"])
+mean(all_data$Diameter[all_data$Sex == "female"])
+```
+Is this difference significant?
+To have a first look I created a plot with mean values and confidence limits for female and male mollusks:
+
+```{r}
+all_data %>% 
+  filter(., Sex == "male" | Sex == "female") %>% 
+  ggplot(., aes(x = Sex, y = Diameter, color = Sex)) +
+  stat_summary(geom = 'pointrange', 
+               fun.data = mean_cl_normal) +
+  theme_bw() +
+  scale_color_brewer(type = "qual", palette = 2)
+```
+
+As we can see confidence limits between mollusks with 5 and 15 rings do not intersect, which implies that the diameter of the female and male mollusks is different. 
+
+As far as our samples are bigger than 30, we can apply two-sampled Student's t-Test:
+
+```{r}
+nrow(all_data[all_data$Sex == "female", ])
+nrow(all_data[all_data$Sex == "male", ])
+
+t_test_diam <- t.test(x = all_data$Diameter[all_data$Sex == "female"], y = all_data$Diameter[all_data$Sex == "male"])
+```
+
+As far as p-value < 0.05 we can reject null hypothesis and accept that female mollusks are significantly bigger than male mollusks.
+
