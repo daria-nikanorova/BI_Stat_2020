@@ -1,0 +1,459 @@
+---
+title: "Project #2. Which Boston district is the best?"
+date: "10/15/2020"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_section: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if (!require("MASS")) install.packages("MASS")
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("tidyr")) install.packages("tidyr")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("outliers")) install.packages("outliers")
+if (!require("car")) install.packages("car")
+if (!require("gridExtra")) install.packages("gridExtra")
+if (!require("multcomp")) install.packages("multcomp")
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(outliers)
+library(car)
+library(MASS)
+library(gridExtra)
+library(multcomp)
+
+theme_set(theme_bw())
+```
+
+
+# Data description
+
+This project is aimed to identify significant factors that affect average cost of houses in Boston. The data was obtained from Harrison, D. and Rubinfeld, D.L. (1978). The data contains information about 506 houses in Boston across 14 parameters:
+
+* **median value of owner-occupied homes (/$1000s).**
+* per capita crime rate by town (crim)
+* proportion of residential land zoned for lots over 25,000 sq.ft. (zn)
+* proportion of non-retail business acres per town (indus)
+* Charles River dummy variable (= 1 if tract bounds river; 0 otherwise) (chas)
+* nitrogen oxides concentration (parts per 10 million) (nox)
+* average number of rooms per dwelling (rm)
+* proportion of owner-occupied units built prior to 1940 (age)
+* weighted mean of distances to five Boston employment centres (dis)
+* index of accessibility to radial highways (rad)
+* full-value property-tax rate per \$10,000 (tax)
+* pupil-teacher ratio by town (ptratio)
+* the proportion of blacks by town (black)
+* lower status of the population (percent) (lstat)
+
+We are interested whether the median price of houses depends on these factors? Our aim is to decide which Boston district is the best for building.
+
+The data was obtained from MASS package, variables "chas" and "rad" were converted to factors. Also we obtained a scaled data for further analysis.
+
+```{r}
+boston <- Boston
+
+boston$rad <- as.factor(boston$rad)
+boston$chas <- as.factor(ifelse(boston$chas == 1, "yes", "no"))
+
+boston_scaled <- as.data.frame(sapply(boston[, -c(4,9)], scale))
+boston_scaled <- cbind(boston[, c(4, 9)], boston_scaled)
+```
+
+Possible interactions between variables become visible on scatterplots for each pair of variables. As we can see, there are some plots with vivid linear relations. It may bring multicollinearity between predictors in a model.
+
+```{r}
+pairs(boston)
+```
+
+# Full linear model
+
+A full linear model without interactions were obtained for initial data:
+
+```{r}
+mod <- lm(medv ~ ., boston)
+```
+
+
+## Find the most significant predictor
+
+```{r}
+mod_scaled <- lm(medv ~ ., boston_scaled)
+
+betas <- coef(mod_scaled)
+betas_fact <- betas[1] + betas[2:10] #coefficients for factor levels must be summarized with intercept
+
+betas <- c(betas[-c(2:10)], betas_fact)
+max(abs(betas[-1]))
+```
+
+We can see that the most significant predictor is *lstat* because it has the highest coefficient in a full model, built on scaled data. 
+
+But we can not be sure if this result is correct unless we check if our model meet the following requirements of the linear regression:
+* Homoscadasticity
+* Influential values
+* Linear intercation with predictors
+* Absence of multicollinearity
+
+## Diagnostics of model
+
+### Multicollinearity
+
+First step in analyzing our model is checking if multicollinearity presents in our model with **vif** function. As we can see, there are indeed some linear interaction between predictors (VIF > 2). 
+
+```{r}
+vif(mod)
+```
+
+
+Firstly we need to get data for analysis of residuals of our model. To do that I used function `fortify`
+
+```{r}
+mod_diag <- data.frame(fortify(mod))
+```
+
+
+### Cook distance
+
+Plot of Cook distance shows if there are any influential observations:
+
+```{r}
+ggplot(data = mod_diag, aes(x = 1:nrow(boston), y = .cooksd)) + 
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept = 0.3, color = "red")
+```
+
+As we can see none of them are higher than 2.0, which means there are no influential observations in our data.
+
+### Residuals vs fitted values
+
+This scatter plot shows if there are non-linear pattern between our variables and if the standard deviation is constant in the distribution of residuals (heteroscedasticity).
+
+```{r warning = FALSE}
+gg_resid <- ggplot(data = mod_diag, aes(x = .fitted, y = .stdresid)) + 
+  geom_point() + 
+  geom_hline(yintercept = 0) + 
+  geom_smooth(method = 'loess') +
+  geom_hline(yintercept = 2, color = "red") +
+  geom_hline(yintercept = -2, color = "red")
+gg_resid
+```
+
+Unfortunately, we can see a pattern on this plot, which means that the residuals of our model are not distributed normally.
+
+### Residuals vs predictors in a model
+
+This plot is helpful in finding out which precise predictor causes a problem with residulas on previous plot.
+
+```{r warning = FALSE, message = FALSE}
+gg_resid_factors <- ggplot(data = mod_diag, aes(x = .fitted, y = .stdresid)) + 
+  geom_boxplot() +
+  geom_hline(yintercept = 2, color = "red") +
+  geom_hline(yintercept = -2, color = "red")
+
+res_1 <- gg_resid_factors + aes(x = chas)
+res_2 <- gg_resid_factors + aes(x = rad)
+res_3 <- gg_resid + aes(x = indus)
+res_4 <- gg_resid + aes(x = dis)
+res_5 <- gg_resid + aes(x = lstat)
+res_6 <- gg_resid + aes(x = zn)
+res_7 <- gg_resid + aes(x = rm)
+res_8 <- gg_resid + aes(x = age)
+res_9 <- gg_resid + aes(x = ptratio)
+res_10 <- gg_resid + aes(x = black)
+res_11 <- gg_resid + aes(x = crim)
+res_12 <- gg_resid + aes(x = nox)
+res_13 <- gg_resid + aes(x = tax)
+
+resit_predict_in <- grid.arrange(res_1, res_2, res_3, res_4, res_5, res_6, res_7, res_8, res_9, res_10, nrow = 2)
+resit_predict_in
+```
+
+We can see non-linear interactions between *medv* and some of predictors: *rm*, *dis*, *lstat*. I assumed that this is due to outliers, which are seen on the plots.
+
+### Normal distribution of residuals
+
+Finally we can see that residuals in our model are not distributed normally:
+
+```{r warning = FALSE}
+qqPlot(mod)
+```
+
+All in all our model does not meet the requirements of the linear regression. Because of that we can not apply it and should modify it.
+
+# Removing outliers from data
+
+We assumed that the great part of problems with a full model derived from presence of outliers in our data. We wrote a special function to replace all outliers with mean value:
+
+```{r message = FALSE}
+replace_outliers_mean <- function(x, na.rm = TRUE, ...) {
+  quant <- quantile(x, probs = c(.25, .75), na.rm = na.rm, ...)
+  H <- 1.5 * IQR(x, na.rm = na.rm)
+  y <- x
+  y[x < quant[1] - H] <- mean(x)
+  y[x > quant[2] + H] <- mean(x)
+  y
+}
+```
+
+We applied it to all numeric variables in the data:
+
+```{r}
+boston_filt <- as.data.frame(lapply(boston[, -c(4,9)], replace_outliers_mean))
+
+boston <- cbind(boston[, c(4, 9)], boston_filt)
+```
+
+# Selection of predictors by VIF values
+
+We again started from a full model but this time we selected step-by-step only predictors with VIF < 2. On this step we skipped *tax*, *crim* and *nox*.
+
+```{r}
+mod <- lm(medv ~ ., boston)
+vif(mod)
+summary(mod)
+
+mod2 <- update(mod, . ~ . -tax)
+vif(mod2)
+
+mod3 <- update(mod2, . ~ . -crim)
+vif(mod3)
+
+mod4 <- update(mod3, . ~ . -nox)
+vif(mod4)
+```
+
+
+# Selection of significant predictors
+
+Next we applied F-test to select only significant predictors. On this step we found that *zn* is not significant (p > 0.05) and skipped it:
+
+```{r}
+drop1(mod4, test = 'F')
+
+mod5 <- update(mod4, . ~ . - zn)
+drop1(mod5, test = 'F')
+```
+
+## Find the most significant predictor
+
+```{r}
+mod_scaled <- lm(medv ~ chas + rad + indus + dis + lstat + rm + age + ptratio + black, boston_scaled)
+vif(mod_scaled)
+
+summary(mod_scaled)
+betas <- coef(mod_scaled)
+betas_fact <- betas[1] + betas[2:10]
+
+betas <- c(betas[-c(2:10)], betas_fact)
+max(abs(betas[-1]))
+```
+
+We can see that the most significant predictor is again *lstat* because it has the highest coefficient in a full model, built on scaled data. 
+
+But to admit its significance, we should check if our model meet the requirements of the linear regression.
+
+## Diagnostics of model
+
+Firstly we need to get data for analysis of residuals of our model. To do that I used function `fortify`
+
+```{r}
+mod5_diag <- data.frame(fortify(mod5), boston$nox, boston$tax, boston$crim)
+```
+
+
+### Cook distance
+
+Plot of Cook distance shows if there are any influential observations:
+
+```{r}
+ggplot(data = mod5_diag, aes(x = 1:nrow(boston), y = .cooksd)) + 
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept = 0.3, color = "red")
+```
+
+As we can see none of them are higher than 2.0, which means there are no influential observations in our data.
+
+### Residuals vs fitted values
+
+This scatter plot shows if there are non-linear pattern between our variables and if the standard deviation is constant in the distribution of residuals (heteroscedasticity).
+
+```{r warning = FALSE}
+gg_resid_factors <- ggplot(data = mod5_diag, aes(x = .fitted, y = .stdresid)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 2, color = "red") +
+  geom_hline(yintercept = -2, color = "red")
+
+gg_resid <- ggplot(data = mod5_diag, aes(x = .fitted, y = .stdresid)) + 
+  geom_point() + 
+  geom_hline(yintercept = 0) + 
+  geom_smooth(method = 'lm') +
+  geom_hline(yintercept = 2, color = "red") +
+  geom_hline(yintercept = -2, color = "red")
+gg_resid
+```
+
+We can see that a strong pattern has gone, which means that the residuals of our model are distributed quite normally and that there is only linear interactions between *medv* and predictors.
+
+### Residuals vs predictors in a model
+
+This plot is helpful in finding out which precise predictor causes a problem with residulas on previous plot.
+
+```{r warning = FALSE, message = FALSE}
+res_1 <- gg_resid_factors + aes(x = chas)
+res_2 <- gg_resid_factors + aes(x = rad)
+res_3 <- gg_resid + aes(x = indus)
+res_4 <- gg_resid + aes(x = dis)
+res_5 <- gg_resid + aes(x = lstat)
+res_6 <- gg_resid + aes(x = rm)
+res_7 <- gg_resid + aes(x = age)
+res_8 <- gg_resid + aes(x = ptratio)
+res_9 <- gg_resid + aes(x = black)
+
+resit_predict_in <- grid.arrange(res_1, res_2, res_3, res_4, res_5, res_6, res_7, res_8, res_9, nrow = 2)
+
+resit_predict_in
+```
+
+No non-linear interactions between *medv* and predictors were observed. 
+
+### Residuals vs predictors out of a model
+
+This plot is helpful in finding out if we lose some significant predictors during selection.
+
+```{r warning = FALSE, message = FALSE}
+res_10 <- gg_resid + aes(x = boston$zn)
+res_11 <- gg_resid + aes(x = boston$crim)
+res_12 <- gg_resid + aes(x = boston$nox)
+res_13 <- gg_resid + aes(x = boston$tax)
+
+resit_predict_out <- grid.arrange(res_10, res_11, res_12, res_13, nrow = 1)
+resit_predict_out
+```
+
+
+### Normal distribution of residuals
+
+Finally we can see that residuals in our model are distributed quite normally:
+
+```{r}
+qqPlot(mod5)
+```
+
+All in all our model meets the requirements of the linear regression.
+
+```{r}
+summary(mod5)
+```
+
+After modification and selection of predictors we got the following model:
+
+medv = 2.7 - 0.08 * indus + 3.24 * rm - 0.035 * age - 0.34 * dis  - 0.3 * ptratio + 0.028 black - 0.32 lstat + 1.6 * chas(yes) + 2.93 * rad(2) - 3.12 * rad(3) + 1.17 * rad(4) + 2.07 * rad(5) + 1.1 * rad(6) + 3.3 * rad(7) + 2.12 * rad(8) - 0.42 * rad(24)
+
+Note that *chas* and *rad* are dummy variables.
+
+# Vizualization of lstat influence
+
+To visualize *lstat* influence we removed one of factor predictors from our model (we will concentrate on it later).
+
+```{r}
+mod_chas <- update(mod5, . ~ . - rad)
+drop1(mod_chas, test = 'F')
+```
+
+We created a new data with all variables except from *lstat* bound to their mean values:
+
+```{r}
+MyData <- data.frame(
+  lstat = seq(min(boston$lstat), max(boston$lstat), length.out = 100),
+  indus = mean(boston$indus),
+  dis = mean(boston$dis),
+  age = mean(boston$age),
+  rm = mean(boston$rm),
+  ptratio = mean(boston$ptratio),
+  black = mean(boston$black),
+  chas = unique(boston$chas))
+head(MyData)
+```
+
+We found predicted values:
+
+```{r}
+Predictions <- predict(mod_chas, newdata = MyData,  interval = 'confidence')
+MyData <- data.frame(MyData, Predictions)
+```
+
+And created a plot for our model:
+
+```{r}
+Pl_predict <- ggplot(MyData, aes(x = lstat, y = fit)) +
+  geom_ribbon(alpha = 0.2, aes(ymin = lwr, ymax = upr, fill = chas)) +
+  geom_line(aes(color = chas)) +
+  labs(x = "Lower status of the population", y = "Price") +
+  ggtitle("Predicted values of price for lower status of the population")
+Pl_predict
+```
+
+# Vizualization of rad influence
+
+We next focused on rad variables, as far as accessibility to radial highways may be of great importance for people. So we removed *chas* from our model and concentrated on *rad*. Actually after removing *chas* we noticed that VIF of *indus* became higher, so we removed this predictor too: 
+
+```{r}
+mod_rad <- update(mod5, . ~ . - chas)
+drop1(mod_rad, test = 'F')
+
+mod_rad <- update(mod_rad, . ~ . - indus)
+drop1(mod_rad, test = 'F')
+```
+
+We again created a data frame for predictions with all unique values for *rad* and mean values of numeric predictors in a model:
+
+```{r}
+new_data <- data.frame(rad = factor(levels(boston$rad),levels = levels(boston$rad)),
+                       lstat = mean(boston$lstat),
+                       indus = mean(boston$indus),
+                       dis = mean(boston$dis),
+                       age = mean(boston$age),
+                       rm = mean(boston$rm),
+                       ptratio = mean(boston$ptratio),
+                       black = mean(boston$black))
+```
+
+We calculated predicted values and 95% confidence interval:
+
+```{r}
+new_data$fit <- predict(mod_rad, newdata = new_data, se.fit = TRUE)$fit
+
+new_data$se <- predict(mod_rad, newdata = new_data, se.fit = TRUE)$se.fit
+
+t_crit <- qt(0.975, df = nrow(boston) - length(coef(mod_rad)))
+
+new_data$upr <- new_data$fit + t_crit * new_data$se
+new_data$lwr <- new_data$fit - t_crit * new_data$se
+```
+
+Finally we created a barplot for each level of *rad* variable:
+
+```{r}
+ggplot(new_data, aes(x = rad, y = fit)) +
+  geom_bar(stat = 'identity', aes(fill = rad)) +
+  geom_errorbar(aes(ymin = lwr, ymax = upr), width = 0.2) +
+  guides(fill = 'none') +
+  labs(x = "Index of accessibility to radial highways", y = 'Price') +
+  ggtitle("Predicted values of price depends on accessibility to radial highways")
+```
+
+
+
+
+
+
+
+
+
