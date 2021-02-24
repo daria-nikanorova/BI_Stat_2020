@@ -1,0 +1,435 @@
+---
+title: "Project3_Mouse_Down_syndrome"
+date: "2/24/2020"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_section: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!require("readxl")) install.packages("readxl")
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("stringr")) install.packages("stringr")
+if (!require("car")) install.packages("car")
+if (!require("multcomp")) install.packages("multcomp")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("lme4")) install.packages("lme4")
+if (!require("vegan")) install.packages("vegan")
+if (!require("mixOmics")) install.packages("mixOmics")
+if (!require("gridExtra")) install.packages("gridExtra")
+if (!require("plotly")) install.packages("plotly")
+
+library(readxl)
+library(dplyr)
+library(stringr)
+library(car)
+library(multcomp)
+library(ggplot2)
+library(lme4)
+library(vegan)
+library(mixOmics)
+library(gridExtra)
+library(plotly)
+
+
+theme_set(theme_bw())
+```
+
+# Data description
+
+This project is aimed to identify significantly expressed proteins in the cerebral cortex of control and Down syndrome mice exposed to context fear conditioning. The data was obtained from Ahmed MM, Dhanasekaran AR, Block A, Tong S, Costa ACS, Stasko M, et al. (2015). We can upload data set and take a look at its structure:
+
+```{r}
+# replace with the full path to the Data_Cortex_Nuclear.xls file to upload the data
+df <- read_excel("/media/daria/DaryaNika/IB_fall2020/Statistics_in_R/data/Data_Cortex_Nuclear.xls")
+head(df)
+
+# str(df) leads to a very long output, uncomment, if you want to take a look:
+#str(df)
+```
+
+As we can see, the data set consists of the expression levels of 77 proteins detected in the nuclear fraction of brain cortex. Each row contains observation for 1 sample, while each column 2-78 refers to a single protein. There are 5 additional variables *("MouseID", "Genotype", "Treatment", "Behavior", "class")* containing further information:
+
+* Identification number of a mouse, note that suffix after "_" indicates a number of sample, can be 1-15 (*MouseID*)
+* Control or trisomic mouse  (*Genotype*)
+* Stimulated to learn (context-shock) mice and not-stimulated (shock-context) mice (*Behavior*)
+* Memantine injected mice (Memantine) or saline injected mice (Saline) (*Treatment*)
+
+We can turn all non-numeric variables into factors for further analysis.
+
+```{r}
+df <- df %>% 
+  mutate(across(where(is.character), ~ as.factor(.x)))
+```
+
+## Number of mice in experiment
+
+Although the data set consists of 1080 rows, the number of objects is less, as far as 15 measurements were made for each object. Thus, 72 mice were examined. To confirm this assumption, we can cut additional indexes in "MouseID" variable (_number) and count unique objects:
+
+```{r}
+nrow(df)/15 == length(unique(str_replace(df$MouseID, pattern = "_\\d*", "")))
+```
+
+## What groups may be defined
+
+According to the features mentioned above 8 classes of mice can be defined:
+c-CS-s: control mice, stimulated to learn, injected with saline 
+c-CS-m: control mice, stimulated to learn, injected with memantine 
+c-SC-s: control mice, not stimulated to learn, injected with saline 
+c-SC-m: control mice, not stimulated to learn, injected with memantine 
+
+t-CS-s: trisomy mice, stimulated to learn, injected with saline 
+t-CS-m: trisomy mice, stimulated to learn, injected with memantine 
+t-SC-s: trisomy mice, not stimulated to learn, injected with saline 
+t-SC-m: trisomy mice, not stimulated to learn, injected with memantine 
+
+Class for each mice is stored in *class* variable.
+
+It is more convenient to divide *MouseID* variable into two variables: *MouseID* will indicate ID of each mouse, while *MouseID_sample* will indicate a number of sample (1-15) for each mouse:
+
+```{r}
+df <- df %>%
+  mutate(MouseID_sample = str_replace(df$MouseID, pattern = "\\d*_", ""), .before = 2,
+         MouseID = str_replace(df$MouseID, pattern = "_\\d*", ""))
+```
+
+
+## Are the groups balanced?
+
+We can count number of mice in each group using dplyr functions `group_by` and `summarise`:
+
+```{r}
+df %>% 
+  group_by(class) %>% 
+  summarise(N = length(unique(str_replace(MouseID, pattern = "_\\d*", ""))))
+```
+
+As we can see, number of objects in group range between 7 and 10. We assume that the data is balanced, however it would be better to have more than 7 objects in t-CS-s class.
+
+## Missing values (NAs)
+
+```{r}
+nrow(df[which(!complete.cases(df)), ]) # number of rows with NA
+```
+We can see that there are 528 rows with missing values. As far as there are 15 replicates for each protein, we can replace some missing values with the mean value for this protein in the object:
+
+```{r}
+replace_NA_grouped_mean <- function(data_with_NA){
+  data_with_NA %>%
+    group_by(MouseID) %>%
+    mutate(across(where(is.numeric), ~ ifelse(is.na(.x), mean(.x, na.rm = T), .x)))
+}
+df <- replace_NA_grouped_mean(df)
+
+nrow(df[which(!complete.cases(df)), ])
+```
+
+Surprisingly, only 3 out of 528 NAs are gone. It means that in most cases we have missing values for all 15 replicates and can not replace them with the mean. It will be wiser not to cut out all rows with missing values, because we have only 7-10 objects in each group. 
+
+# BDNF_N expression in differnet groups
+
+First of all we need to check if there are any missing values in *BDNF_N* values and take a look on possible difference between groups based on BDNF expression:
+
+```{r}
+nrow(df[which(!complete.cases(df$BDNF_N)), ]) # number of rows with NA
+
+ggplot(df, aes(class, df$BDNF_N, color = class)) + 
+  stat_summary(fun.data = "mean_cl_normal") + 
+  ggtitle(label = "Mean BDNF expression level") +
+  ylab(label = "BDNF expression")
+```
+
+Assuming possible difference between groups, we next apply one-way ANOVA to compare them.
+
+## One-way ANOVA
+
+Next we need to construct a linear mixed-effects model (LMM) with grouping factor *MouseID*:
+
+```{r}
+mod_BDNF <- lmer(BDNF_N ~ class + (1 | MouseID), data = df)
+summary(mod_BDNF)
+```
+
+One-way Anova with III-type Sum of Square is used to compare groups (as far as we have different number of objects in some groups):
+
+```{r}
+BDNF_anova <- Anova(mod_BDNF, type = "III")
+BDNF_anova
+```
+
+Expression level of BDNF protein is significantly depends on group of mice (p_value = 0.02995, df = 7)
+
+## Model diagnostics
+
+Data for analysis of residuals of our model is constructed by `fortify` function. The boxplot shows the standard deviation is constant in the distribution of residuals (heteroscedasticity). 
+
+```{r}
+mod_diag <- fortify(mod_BDNF)
+
+ggplot(mod_diag, aes(x = class, y = .scresid)) + geom_boxplot() + ggtitle("Residuals vs. fitted values")
+```
+
+There is only a little variation in standard deviations between groups, which means that our model is appropriate.
+
+## Post-hoc tests
+
+After indication of significant factor, we can apply Tukey Contrasts to distinguish which groups have significantly different level of BDNF expression (df = 72).
+
+```{r}
+post_hoch <- glht(mod_BDNF, linfct = mcp(class = "Tukey"))
+result <- summary(post_hoch)
+result
+```
+
+BDNF expression level is significantly higher in control mice, stimulated to learn, injected with memantine (c-CS-m) than in control mice, not stimulated to learn, injected with memantine (c-SC-m) (z value = -3.064, p_value = 0.0454). That means that there is a significant effect of training in saline-injected controls. BDNF expression level is significantly higher in control mice, not stimulated to learn, injected with saline (c-SC-s) than in control mice, stimulated to learn, injected with memantine (c-CS-m) (z value = -3.174, p_value = 0.0326).
+
+## Visualisation
+
+We predicted values based on our model using matrices, then found standard errors, confidence intervals and visualize our result:
+
+```{r}
+df_post_hoc <- data.frame(class = factor(levels(df$class), levels = levels(df$class)))
+
+# model matrix
+X <- model.matrix(~ class,
+                  data = df_post_hoc)
+betas = fixef(mod_BDNF)
+df_post_hoc$fit <- X %*% betas
+
+# SE and CI
+df_post_hoc$se <- sqrt( diag(X %*% vcov(mod_BDNF) %*% t(X)) )
+df_post_hoc$lwr <- df_post_hoc$fit - 2 * df_post_hoc$se
+df_post_hoc$upr <- df_post_hoc$fit + 2 * df_post_hoc$se
+
+ggplot(data = df_post_hoc, aes(x = class, y = fit)) +
+  geom_bar(stat = "identity", aes(fill = class), width = 0.5) +
+  geom_errorbar(aes(ymin = lwr, ymax = upr), width = 0.1) +
+  ggtitle(label = "BDNF expression level in mice (Tukey Contrasts)") + 
+  ylab(label = "BDNF expression") +
+  geom_text(aes(y = 0.25, label = c("*", "*", "*", "", "", "", "", "")))
+```
+
+# ERBB4 level prediction
+
+## Linear mixed-effects model (LMM) 
+
+It is known that some proteins may share expression patterns, especially proteins from the same pathway. In order to check whether expression level of ERBB4 protein can depend on expression level of other proteins we applied linear regression. We selected proteins, which are known to be connected with Alzheimer`s disease, such as CaNA, CDK5, P3525, Tau, SNCA, IL1B, and nNOS. MouseID again is used as a random factor. 
+
+```{r}
+df_AD <- df %>% 
+  dplyr::select(MouseID, MouseID_sample, Genotype, Treatment, Behavior, class, CaNA_N, CDK5_N, P3525_N, ERBB4_N, Tau_N, SNCA_N, IL1B_N, nNOS_N)
+
+mod_AD <- lmer(ERBB4_N ~ CaNA_N + CDK5_N + P3525_N + Tau_N + SNCA_N + IL1B_N + nNOS_N + class + (1 | MouseID), data = df_AD)
+summary(mod_AD)
+```
+
+## Selection of significant predictors
+
+Next we applied F-test to select only significant predictors. On this step we found that *CDK5_N* and *SNCA_N* are not significant (p > 0.05) and skipped them:
+
+```{r}
+drop1(mod_AD, test = 'Chi')
+mod_AD1 <- update(mod_AD, .~.-CDK5_N)
+drop1(mod_AD1, test = 'Chi')
+mod_AD2 <- update(mod_AD1, .~.-SNCA_N)
+drop1(mod_AD2, test = 'Chi')
+```
+
+As we can see expression level of ERBB4 protein significantly depends on expression level CaNA, P3525, Tau, IL1B, and nNOS proteins. 
+
+## Diagnostics of model
+
+Firstly we need to get data for analysis of residuals of our model. To do that I used function `fortify`
+
+```{r}
+mod2_diag <- fortify(mod_AD2)
+head(mod2_diag)
+```
+
+### Residuals vs fitted values
+
+These plots show if there are non-linear pattern between our variables and if the standard deviation is constant in the distribution of residuals (heteroscedasticity).
+
+
+```{r}
+gg_resid_factors <- ggplot(data = mod2_diag, aes(x = .fitted, y = .scresid)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 2, color = "red") +
+  geom_hline(yintercept = -2, color = "red")
+
+gg_resid <- ggplot(data = mod2_diag, aes(x = .fitted, y = .scresid)) + 
+  geom_point() + 
+  geom_hline(yintercept = 0) + 
+  geom_smooth(method = 'lm') +
+  geom_hline(yintercept = 2, color = "red") +
+  geom_hline(yintercept = -2, color = "red")
+
+res_1 <- gg_resid_factors + aes(x = class)
+res_2 <- gg_resid + aes(x = CaNA_N)
+res_3 <- gg_resid + aes(x = P3525_N)
+res_4 <- gg_resid + aes(x = Tau_N)
+res_5 <- gg_resid + aes(x = IL1B_N)
+res_6 <- gg_resid + aes(x = nNOS_N)
+
+resit_predict_in <- grid.arrange(res_1, res_2, res_3, res_4, res_5, res_6, nrow = 2)
+
+resit_predict_in
+```
+
+There are some outliers and a tiny pattern in Tau_N plot, which may imply heteroscedasticity. However these deviations are not crucial and we assume that our model meets requirements of linear regression analysis.
+
+## Visualisation of group influence
+
+Finally we created a barplot for each level of class variable:
+
+```{r}
+df_post_hoc <- data.frame(class = factor(levels(df_AD$class), levels = levels(df_AD$class)),
+                          CaNA_N = mean(df_AD$CaNA_N),
+                          P3525_N = mean(df_AD$P3525_N),
+                          Tau_N = mean(df_AD$Tau_N),
+                          IL1B_N = mean(df_AD$IL1B_N),
+                          nNOS_N = mean(df_AD$nNOS_N))
+df_post_hoc
+
+# model matrix
+X <- model.matrix(~ class + CaNA_N + P3525_N + Tau_N + IL1B_N + nNOS_N,
+                  data = df_post_hoc)
+
+betas = fixef(mod_AD2)
+df_post_hoc$fit <- X %*% betas
+
+# SE and CI
+df_post_hoc$se <- sqrt( diag(X %*% vcov(mod_AD2) %*% t(X)) )
+df_post_hoc$lwr <- df_post_hoc$fit - 2 * df_post_hoc$se
+df_post_hoc$upr <- df_post_hoc$fit + 2 * df_post_hoc$se
+
+ggplot(data = df_post_hoc, aes(x = class, y = fit)) +
+  geom_bar(stat = "identity", aes(fill = class), width = 0.5) +
+  geom_errorbar(aes(ymin = lwr, ymax = upr), width = 0.1)
+```
+
+We assume our model to be appropriate, and we indeed can predict expression level of proteins based on expression level of other proteins. However, a choice of predictors should be done carefully, for example, proteins with shared expression pattern.
+
+# PCA
+
+Principal component analysis was applied using paclage "vegan".
+
+## Ordination
+
+```{r}
+mouse_pca <- rda(df[, -c(1,2,80,81,82,83)], scale = TRUE)
+```
+
+## Biplot
+
+Biplots of Eigenvectors for Species scores and Site scores were constructed:
+
+```{r}
+biplot(mouse_pca, scaling = "species", display = "species")
+biplot(mouse_pca, scaling = "sites", display = "sites")
+```
+
+
+## Proportion Explained
+
+To found out how much was explained by each of PCs, we draw different plots
+
+### Screeplot
+
+On this plot we can see that Ordination line (black) crosses Brocken Stick (red) only at PC7, which means that PC1-PC6 are of great importance and can explain a great part of variability.
+
+```{r}
+screeplot(mouse_pca, type = "lines", bstick = TRUE)
+```
+
+### Barplot
+
+The same is imaged on a barplot:
+
+```{r}
+pca_summary <- summary(mouse_pca)
+pca_result <- as.data.frame(pca_summary$cont)
+plot_data <- as.data.frame(t(pca_result[c("Proportion Explained"),]))
+plot_data$component <- c(1:76)
+
+ggplot(plot_data, aes( component, `Proportion Explained`)) + 
+  geom_bar(stat = "identity") + 
+  theme_bw()
+```
+
+## Ordination plot
+
+We can construct an ordination plot in PC1-PC2 dimensions:
+
+```{r}
+df_scores <- data.frame(df,
+                        scores(mouse_pca, display = "sites", choices = c(1, 2, 3), scaling = "sites"))
+
+p_scores <- ggplot(df_scores, aes(x = PC1, y = PC2)) + 
+  geom_point(aes( color = class), alpha = 0.5) +
+  coord_equal(xlim = c(-1.2, 1.2), ylim = c(-1.2, 1.2)) + ggtitle(label = "Ordination") + theme_bw()
+p_scores
+```
+
+## 3D ordination plot
+
+Otherwise we can draw a 3D ordination plot using plotly:
+
+```{r}
+fig <- plot_ly(df_scores, x = ~PC1, y = ~PC2, z = ~PC3, color = ~class, size = 0.5)
+fig <- fig %>% add_markers()
+fig
+```
+
+# Find DE genes with sPLS-DA
+
+To define specific genes responsible for main difference between groups we applied sPLS-DA analysis.
+Firstly we counted a proper number of principal components for further analysis:
+
+```{r}
+list.keepX <- c(5:10,  seq(20, 100, 10))
+set.seed(30) 
+tune.splsda.srbct <- tune.splsda(df[, -c(1,2,80,81,82,83)], df$class, ncomp = 7, # число компонент берется как число групп-1
+                                 validation = 'Mfold',
+                                 folds = 3, dist = 'max.dist', progressBar = FALSE,
+                                 measure = "BER", test.keepX = list.keepX,
+                                 nrepeat = 10)   
+ncomp <- tune.splsda.srbct$choice.ncomp$ncomp 
+ncomp
+
+select.keepX <- tune.splsda.srbct$choice.keepX[1:ncomp] 
+select.keepX
+```
+
+We next performed analysis with calculated arguments:
+
+```{r}
+MyResult.splsda.fixed <- splsda(df[, -c(1,2,80,81,82,83)], df$class, ncomp = ncomp, keepX = select.keepX)
+```
+
+Finally we visualised our result:
+
+```{r}
+layout(matrix(c(1, 2, 3, 3, 3, 3), 2, 3))
+plotLoadings(MyResult.splsda.fixed, comp = 1, size.name = 1, size.title = 1.2, title = "Loadings\n on 1st component", contrib = "max", legend = FALSE, ndisplay = 10)
+plotLoadings(MyResult.splsda.fixed, comp = 2, size.name = 1, size.title = 1.2, title = "Loadings\n on 2nd component", contrib = "max",ndisplay = 10,  legend = FALSE)
+plotIndiv(MyResult.splsda.fixed, ind.names = F, ellipse = T, style = "graphics", abline = TRUE, cex = 2, pch = 19, size.axis = 1.2, size.xlabel = 1.5, size.ylabel = 1.5, title = "sPLS-DA ordination of samples", size.title = 1.5)
+legend("bottomleft", legend = levels(df$class), cex = 1, fill = color.mixo(1:8), bty = "n")
+```
+
+We can see deferentially expressed genes that drive difference between groups on this plot.
+
+
+
+
+
+
+
+
+
+
