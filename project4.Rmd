@@ -1,0 +1,170 @@
+---
+title: "Project #4. Survival analysis"
+date: "10/15/2020"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_section: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if (!require("survival")) install.packages("survival")
+if (!require("survminer")) install.packages("survminer")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("ggfortify")) install.packages("ggfortify")
+if (!require("coin")) install.packages("coin")
+
+library(survival)
+library(survminer)
+library(ggplot2)
+library(dplyr)
+library(ggfortify)
+library(coin)
+```
+
+# Data description
+
+This project is focused on survival analysis. We will use `ovarian` dataset (Edmunson, J.H. et al, 1979) from the `survival package`. The data contains information about 26 patients with ovarian cancer. Respective clinical information are stored in the further columns:
+
+futime:	survival or censoring time
+fustat:	censoring status
+age:	in years
+resid.ds:	residual disease present (1=no,2=yes)
+rx:	treatment group
+ecog.ps:	ECOG performance status
+
+```{r}
+ovarian_data <- ovarian
+str(ovarian_data)
+```
+
+In this analysis we will investigate whether age (`age`), presence of residual disease (`resid.ds`), treatment (`rx`) or patients’ performance (`ecog.ps`) influence the probability of patients with ovarian cancer to survive.
+
+## EDA
+
+First of all, there are no missing values in the dataset:
+
+```{r}
+ovarian_data[which(!complete.cases(ovarian_data)), ]
+```
+
+Some of the covariates, such as `rx`, `resid.ds` and `ecog.ps` should be turned into factors, as far as they reflect clinical information, not measurements.
+
+```{r}
+ovarian_data$rx <- factor(ovarian_data$rx)
+ovarian_data$resid.ds <- factor(ovarian_data$resid.ds, 
+                           levels = c("1", "2"), 
+                           labels = c("no", "yes"))
+ovarian_data$ecog.ps <- factor(ovarian_data$ecog.ps, 
+                          levels = c("1", "2"), 
+                          labels = c("good", "bad"))
+```
+
+The `age` variable should be factorized as well for survival analysis. As far as it is a continuous variable, we should decide, how to divide all patients in two age groups. We can take a look at the histogram:
+
+```{r}
+hist(ovarian$age)
+```
+
+We can divide our patients in two groups: those who are older than 50 years will be in the "old" group, while those who are younger than 50 years will be placed in the "young" group:
+
+```{r}
+ovarian_data <- ovarian_data %>% 
+  mutate(age.group = ifelse(age >= 50, "old", "young"))
+
+ovarian_data$age.group <- as.factor(ovarian_data$age.group)
+```
+
+# Kaplan-Meier curves
+
+Now we can fit the Kaplan-Meier curves for our covariates.
+
+## Treatment
+
+We firstly fit the model, than the result is visualized with `ggsurvplot` function. The estimated p-value of a log rank test may be added with the `pval` argument. Log rank test is used to compare survival results between two groups.
+
+```{r}
+km_fit <- survfit(Surv(futime, fustat) ~ rx, data = ovarian_data)
+# summary(km_fit)
+ggsurvplot(km_fit, data = ovarian_data, pval = TRUE)
+```
+
+Alternatively, we can use `logrank_test` to obtain the results of a log rank test:
+
+```{r}
+logrank_test(Surv(futime, fustat) ~ rx, data = ovarian_data)
+```
+
+As we can see, p-value > 0.05, so we conclude, that there is no significant difference between groups. Consequently, the treatment does not influence the probability of survive.
+
+##  Presence of residual disease
+
+We again fit the model and visualise the rsult, adding p-value from log rank test:
+
+```{r}
+km_fit2 <- survfit(Surv(futime, fustat) ~ resid.ds, data = ovarian_data)
+logrank_test(Surv(futime, fustat) ~ resid.ds, data = ovarian_data)
+ggsurvplot(km_fit2, data = ovarian_data, pval = TRUE)
+```
+
+P-value > 0.05, which means that there is no significant difference between patients with residual disease and patients without it.
+
+## Patients’ performance
+
+Having made the same steps, we draw the conclusion, that the patients’ performance is also not significant in terms of survival:
+
+```{r}
+km_fit3 <- survfit(Surv(futime, fustat) ~ ecog.ps, data = ovarian_data)
+logrank_test(Surv(futime, fustat) ~ ecog.ps, data = ovarian_data)
+ggsurvplot(km_fit3, data = ovarian_data, pval = TRUE)
+```
+
+## Age
+
+Similarly, the people of different age do not significantly differ. Interestingly, p-values derived from different functions are not of the same value, still both are higher than 0.05:
+
+```{r}
+km_fit4 <- survfit(Surv(futime, fustat) ~ age.group, data = ovarian_data)
+logrank_test(Surv(futime, fustat) ~ age.group, data = ovarian_data)
+ggsurvplot(km_fit4, data = ovarian_data, pval = TRUE)
+```
+
+# Cox proportional hazards models
+
+We can include all covariates in the Cox proportional hazards models using the `coxph` function and visualize them using the `ggforest`. 
+
+```{r}
+cox <- coxph(Surv(futime, fustat) ~ rx + resid.ds + age.group + ecog.ps, 
+                   data = ovarian_data)
+ggforest(cox, data = ovarian_data)
+```
+
+Cox model calculates the risk of death and respective hazard ratios (HR). Every HR reflects a relative risk of death that compares two levels of binary feature (covariate). More precisely, the probability of the event coming earlier to the patients from one group than to the patients from another group can be estimated using the formula: р = HR/(1+HR). For instance, if HR equals to 1, than the probability of the event (death) coming earlier to the first group is 50%, which means, that there is no difference between groups in terms of time of death. By contrast, if HR > 1, than we admit that the first group is at risk of earlier death compared to the second group.
+
+Looking at the details, a hazard ratio of 0.25 with p-value of 0.032 for treatment groups means that patients who received treatment B have a reduced risk of dying compared to patients who received treatment A.
+
+Next, patients who had residual disease have a increased risk of dying compared to patients who did not have residual disease, with a hazard ratio of 4.25 and p-value of 0.047.
+
+Younger patients are also characterized by decreased risk of dying compared to those who are older than 50 years, with HR of 0.11 and p-value of 0.047.
+
+Finally, there is no evidence for significant influence of patients’ performance on the risk of dying, as far as p-value is higher than 0.05.
+
+Although age (`age.group`), presence of residual disease (`resid.ds`) and treatment (`rx`) were found to be significant in terms of death risk, the results of Cox proportional hazards models must be interpreted cautiously, as far as this model does not assume possible interaction between covariates or their changing during time. 
+
+In order to check this possibility, we can apply `aareg` function from the `survival` package:
+
+```{r}
+aa_fit <- aareg(Surv(futime, fustat) ~ rx + resid.ds + age.group + ecog.ps, 
+                data = ovarian_data)
+autoplot(aa_fit)
+```
+
+As we can see, our covariates tend to transform, which compromise our results slightly.
+
+
+
+
