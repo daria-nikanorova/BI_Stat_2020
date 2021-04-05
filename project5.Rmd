@@ -1,0 +1,284 @@
+---
+title: "Project #5. Binomial regression"
+date: "5/4/2021"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_section: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("car")) install.packages("car")
+if (!require("ROCR")) install.packages("ROCR")
+
+library(ggplot2)
+library(dplyr)
+library(car)
+library(ROCR)
+
+theme_set(theme_classic())
+```
+
+# Data description
+
+This project is focused on binomial regression. We will use dataset, which includes information about GRE (Graduate Record Exam scores) and GPA (grade point average) results of 400 students, as well as prestige of the undergraduate institution they finished. We are interested in how these factors effect admission into graduate school. The response is a binary variable (0 - don't admit, 1 - admit). Respective information are stored in the further columns:
+
+* `admit`:	success of admission (0 - don't admit, 1 - admit)
+* `gre`:	results of GRE (Graduate Record Exam scores)
+* `gpa`:	results of GPA (grade point average)
+* `rank`:	prestige of the undergraduate institution (1 - the lowest, 4 - the highest)
+
+# EDA
+
+```{r}
+graduates <- read.csv("https://stats.idre.ucla.edu/stat/data/binary.csv")
+str(graduates)
+```
+
+`admit` and `rank` should be converted into factors:
+
+```{r}
+graduates <- graduates %>% 
+  mutate(rank = as.factor(rank), admit = factor(admit, labels=c("N","Y")))
+```
+
+There are no NAs in the data:
+
+```{r}
+graduates[!complete.cases(graduates), ]
+```
+
+Take a first look on the possible effect of predictors on response variable. 
+
+```{r}
+ggplot(graduates, aes(gpa, gre, col = rank))+
+  geom_point(size = 2)+
+  facet_grid(.~admit)+
+  scale_colour_brewer(type = "div", palette = 9)
+```
+
+Overall, there is possible correlation between GRE and GPA results, which is quite natural. Usually, students, who have good marks for GRE subject, have high GPA. In addition, the number of red and orange dots is higher on the second plot, which implies that it is easier for students to enter the University, if their undergraduate institution is high-ranked. Finally, the cloud of dots on the second plot is moved towards the upper right angle, which means that higher grades are required for admission. Importantly, classes are not balanced (there are more dots students, who didn't enter the University). It may compromise future analysis.
+
+Having looked on this plot, we can assume, that all three predictors in the data may have effect on the admission of students. Let's check our ideas with binomial regression!
+
+# Logistic model
+
+We must use logistic regression, because the response variable is of binomial type (0/1). Firstly, we can fit model with all predictors. Next we can check with chisquare, implemented in `drop1`, if all of them are significant:
+
+```{r}
+mod <- glm(admit ~ gre + gpa + rank, family = binomial(link = 'logit'), data = graduates)
+drop1(mod, test = "Chi")
+```
+
+All predictors are significant (p-value < 0.05), so we don't need to exclude them from the model.
+
+# Model diagnostics
+
+We need to check if the model meets the requirements for logistic regression before its interpretation.
+
+## Model linearity
+
+Let's start from linearity:
+
+```{r}
+mod_diag <- data.frame(.fitted = fitted(mod, type = 'response'),
+                       .resid_p = resid(mod, type = 'pearson'))
+
+ggplot(mod_diag, aes(y = .resid_p, x = .fitted)) + 
+  geom_point() +
+  geom_hline(yintercept = 0) +  
+  geom_smooth(method = 'loess')
+```
+
+As we can see, the line is slightly skewed, but has linear pattern in general.
+
+## Overdispersion
+
+We can apply a function written by Ben Bolker (http://bbolker.github.io/mixedmodels-misc/glmmFAQ.html) and modificated by Lavrentii Danilov:
+
+```{r}
+overdisp_fun <- function(model) {
+  rdf <- df.residual(model)  # Degrees of freedom N - p
+  if (any(class(model) == 'negbin')) rdf <- rdf - 1 ## k in NegBin GLMM
+  rp <- residuals(model,type='pearson')
+  Pearson.chisq <- sum(rp^2) 
+  prat <- Pearson.chisq/rdf  
+  pval <- pchisq(Pearson.chisq, df=rdf, lower.tail=FALSE) # p-value
+  c(chisq=Pearson.chisq,ratio=prat,rdf=rdf,p=pval)
+}
+
+overdisp_fun(mod)
+```
+
+P-value is higher than 0.05, which means that there is no overdispersion in the model.
+
+Assuming, that the model is of acceptable quality, we can now interpretate its coefficients
+
+# Interpretation of the model
+
+```{r}
+summary(mod)
+```
+We got the following model:
+
+**admit = -3.99 + 0.002gre + 0.8gpa -0.67rank2 -1,34rank2 -1.55rank3**
+
+* The intercept of **-3.99** is the logit of successful admission after graduation from the institution with the highest rank (baseline factor level) and zero grades for GRE and GPA 
+* The b1 of **0.002** means that increase of `gre` by 1 unit will increase the logit by 0.002, in case `gpa` is fixed on zero and factor level is base (rank1).
+* Similarly, the b2 of **0.8** means that increase of `gpa` by 1 unit will increase the logit by 0.8, in case `gre` is fixed on zero and factor level is base (rank1).
+* The b3 of **-0.67** means that the switch towards rank2 of undergraduate university will reduce the logit of successful admission
+* Similarly, the switch towards rank3 of undergraduate university will reduce the logit of successful admission by **1.34**
+* Finally, the switch towards rank4 of undergraduate university will reduce the logit of successful admission by **1.55**
+
+To simplify interpretation we can go back from logs:
+
+```{r}
+exp(mod$coefficients)
+```
+
+Now, we can say that according to our model:
+
+* The odds ratio (OR) of being accepted in the top University with zero marks for GRE and GPA equals **0.019**
+* The OR becomes **0.51**, **0.26** or **0.21** times higher if the University is second-ranked, third-ranked or fourth-ranked respectively 
+* The increase of GRE and GPA marks leads to **1.002** and **2.23** times increase of OR.
+
+Now we can calculate predicted values and visualize our model.
+
+# Prediction and visualization
+
+Results of GPA seem to be more significant predictor, than GRE, as far as its b1 coefficient is bigger. That makes it logical to predict and visualize how the success of admission depends on GPA results and the rank of undergraduate institution. Firstly, we will predict values using matrices.
+
+```{r}
+new_data <- graduates %>% group_by(rank) %>%
+  do(data.frame(gpa = seq(from = min(.$gpa), to = max(.$gpa), length.out = 100), 
+                gre = mean(.$gre)))
+
+# Model matrix and coefficients
+X <- model.matrix(~ gre + gpa + rank, data =  new_data)
+b <- coef(mod)
+
+# Predicted values and standard errors in logits
+
+new_data$fit_eta <- X %*% b
+new_data$se_eta <- sqrt(diag(X %*% vcov(mod) %*% t(X)))
+
+# ...and in response value scaling
+
+logit_back <- function(x) exp(x)/(1 + exp(x)) # reverse logit-transformation
+
+
+new_data$fit_pi <- logit_back(new_data$fit_eta)
+
+new_data$lwr_pi <- logit_back(new_data$fit_eta - 2 * new_data$se_eta)
+new_data$upr_pi <- logit_back(new_data$fit_eta + 2 * new_data$se_eta)
+```
+
+Now we can visualize predicted values as logits:
+
+```{r}
+ggplot(new_data, aes(x = gpa, y = fit_eta, fill = rank))  +
+  geom_line(aes(color = rank)) +
+  geom_ribbon(aes(ymin = fit_eta - 2 * se_eta, ymax = fit_eta + 2 * se_eta), alpha = 0.3)+
+  scale_fill_brewer(type = "div", palette = 9) +
+  scale_colour_brewer(type = "div", palette = 9) +
+  labs(y='logits of admission', x = 'GPA')
+```
+Or as probability:
+
+```{r}
+ggplot(new_data, aes(x = gpa, y = fit_pi, fill = rank)) +
+  geom_ribbon(aes(ymin = lwr_pi, ymax = upr_pi), alpha = 0.4) +
+  geom_line(aes(color = rank)) +
+  scale_fill_brewer(type = "div", palette = 9) +
+  scale_colour_brewer(type = "div", palette = 9) +
+  labs(y='Probability of admission', x = 'GPA')
+```
+
+It is obvious from the plots above that the probability of admission is higher if the rank of undergraduate institution is higher. In addition, the probability of being accepted is getting higher with increase of GPA marks.
+
+However, the most interesting question for students is "Will I enter the University?". We can try to answer this question with our model, predicting the probability of admission for each student in the data. Then we need to test the quality of our predictor.
+
+# Predictor
+Firstly, we can predict the probability of being accepted for each student, compare predicted values with real values and calculate true positive rate (TPR) and false positive rate (FPR) metrics for the classifier. We can depicted TPR and FPR as ROC curve. 
+
+```{r}
+graduates$prob  <- predict(object = mod, type = "response")
+
+pred_fit <- prediction(graduates$prob, graduates$admit)
+perf_fit <- performance(pred_fit,"tpr","fpr")
+plot(perf_fit, colorize=T , print.cutoffs.at = seq(0,1,by=0.1))
+```
+
+In general, if the ROC curve tends to lie on diagonal, the predictions of classifier will be unreliable: it will predict true results only in 50% of cases, just like the tossed coin. The farther the ROC curve lies from the diagonal, the more precise predictions can be calculated. 
+In our case the ROC curve is quite plain, which is not a good sign. 
+
+Let's calculate the Area Under Curve (AUC) to prove it.
+
+```{r}
+auc  <- performance(pred_fit, measure = "auc")
+str(auc)
+```
+
+Indeed, AUC is only 0.693. But we can still try to make some predictions using our model.
+
+In order to predict if a student admit the University or not, we need to choose a cutoff for our predictions. For instance, if the probability of admission, predicted by our model, is 0.6, we will state that the student will be accepted. How can we choose cutoff for our predictions?
+
+One of the possible ways is to find the intersection of three other metrics: accuracy, sensitivity and specificity. 
+
+```{r}
+perf3  <- performance(pred_fit, x.measure = "cutoff", measure = "spec")
+perf4  <- performance(pred_fit, x.measure = "cutoff", measure = "sens")
+perf5  <- performance(pred_fit, x.measure = "cutoff", measure = "acc")
+
+plot(perf3, col = "red", lwd =2)
+plot(add=T, perf4 , col = "green", lwd =2)
+plot(add=T, perf5, lwd =2)
+
+legend(x = 0.6,y = 0.3, c("spec", "sens", "accur"), 
+       lty = 1, col =c('red', 'green', 'black'), bty = 'n', cex = 1, lwd = 2)
+
+abline(v= 0.32, lwd = 2)
+```
+
+On this plot we can see that the intersection of these metrics equals 0.32. So, we will use this value for our predictions. We will create variable `pred_prob`, which reflects predicted probability of being accepted (Yes or No).
+
+```{r}
+graduates$pred_resp  <- factor(ifelse(graduates$prob > 0.32, 1, 0), labels = c("N", "Y"))
+```
+
+
+Now we can compare predicted values with real ones and estimate the percentage of matches:
+
+```{r}
+graduates$correct  <- ifelse(graduates$pred_resp == graduates$admit, 1, 0)
+mean(graduates$correct)
+```
+
+Only 64% of values were predicted correctly. It's not enough, maybe we need to include more variables next time. 
+
+Let's depict our results:
+
+```{r}
+ggplot(graduates, aes(prob, fill = factor(correct)))+
+  geom_dotplot(alpha=0.5)+
+  scale_fill_brewer(type = "qual", palette = 7)
+```
+
+
+Obviously, our model is good enough at predicting negative results (low probabilities). However, it fails on predicting middle values.
+
+All in all, we fit logistic model to predict the probability of admission based on exams' results and the prestige level of undergraduate institution. We found that these factors are significant. The student, who finished top-ranked institution, has ore chances to admit University. In addition, the probability of being admitted is higher for students with high exam scores. 
+
+We also checked if our model is good enough at predicting, using different metrics. Unfortunately, only 64% of values were predicted correctly by our model. We assume that one possible solution to improve our model would be to add other predictors. Secondly, the classes are imbalanced, which means that accuracy is not the best metrics to use.
+
+
+
+
+
+
+
