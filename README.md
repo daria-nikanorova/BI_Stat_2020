@@ -1,6 +1,7 @@
 # BI_Stat_2020
 
 This repository corresponds to the courses "Statistics using R" and "Machine learning" in the first and second semesters in Bioinformatics institute (2020-2021). Reports for 7 projects can be found in corresponding branches of this repository.
+Projects 1-5 were carried out using R, while the last two projects are written in Python.
 
 *Author: Dasha Nikanorova*
 
